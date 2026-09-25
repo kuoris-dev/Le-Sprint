@@ -1,6 +1,6 @@
 # Le Sprint
 
-A two-player running game for the Philips Videopac G7000, written in Intel 8048 assembly.
+A two-player running game for the Philips Videopac G7000, written in Intel 8048 assembly. The game was published in Skrolli Party 2026.
 
 Race to the finish line by alternating your joystick left and right. The faster you alternate, the faster your runner moves!
 
