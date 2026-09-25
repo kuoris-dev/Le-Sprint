@@ -1,0 +1,1285 @@
+; ************************************************************
+; Le Sprint - running game for the Videopac G7000
+; ************************************************************
+
+        cpu    8048
+        org    0400h ; Cartridge code starts at 0400h
+
+        include "g7000.h"
+
+
+; ************************************************************
+; Cartridge entry points
+; ************************************************************
+
+        jmp    selectgame
+        jmp    irq
+        jmp    timer
+        jmp    vsyncirq
+        jmp    start
+        jmp    soundirq
+
+
+; ************************************************************
+; Internal RAM
+; ************************************************************
+
+runner1_x                   equ    20h
+runner1_last_direction      equ    21h
+
+runner2_x                   equ    22h
+runner2_last_direction      equ    23h
+
+timer_running               equ    24h
+timer_hundredths            equ    25h
+timer_seconds               equ    26h
+; 27h intentionally unused (formerly timer_minutes)
+
+countdown_frames            equ    28h
+race_frames                 equ    29h
+
+seconds_tens                equ    2ah
+seconds_ones                equ    2bh
+
+runner1_finished            equ    2ch
+runner2_finished            equ    2dh
+
+runner1_finish_seconds      equ    2eh
+runner1_finish_hundredths   equ    2fh
+
+runner2_finish_seconds      equ    30h
+runner2_finish_hundredths   equ    31h
+
+display_digit0              equ    32h
+display_digit1              equ    33h
+display_digit2              equ    34h
+display_digit3              equ    35h
+
+; ************************************************************
+; Constants
+; ************************************************************
+
+DIR_NONE                    equ    00h
+DIR_LEFT                    equ    01h
+DIR_RIGHT                   equ    02h
+
+RUNNER_START_X              equ    10h
+RUNNER_STEP                 equ    01h
+
+FINISH_X                    equ    83h
+
+PAL_FRAMES_PER_SECOND       equ    50
+
+_DOT                        equ    27h
+
+
+; ************************************************************
+; Timer interrupt
+; ************************************************************
+
+timer:
+        retr
+
+
+; ************************************************************
+; Initialization
+; ************************************************************
+
+start:
+        call   gfxoff
+
+
+; ------------------------------------------------------------
+; Grid color
+; ------------------------------------------------------------
+
+        mov    r0,#vdc_color
+        mov    a,#col_grd_blue
+        movx   @r0,a
+
+
+; ------------------------------------------------------------
+; Horizontal grid
+; ------------------------------------------------------------
+
+        mov    r0,#vdc_gridh0
+        mov    a,#0feh
+        movx   @r0,a
+
+        mov    r0,#vdc_gridh1
+        movx   @r0,a
+
+        mov    r0,#vdc_gridh2
+        movx   @r0,a
+
+        mov    r0,#vdc_gridh3
+        movx   @r0,a
+
+        mov    r0,#vdc_gridh4
+        movx   @r0,a
+
+        mov    r0,#vdc_gridh5
+        movx   @r0,a
+
+        mov    r0,#vdc_gridh6
+        movx   @r0,a
+
+        mov    r0,#vdc_gridh7
+        movx   @r0,a
+
+        mov    r0,#vdc_gridh8
+        movx   @r0,a
+
+
+; ------------------------------------------------------------
+; Vertical finish grid
+; ------------------------------------------------------------
+
+        mov    r0,#vdc_gridv8
+        mov    a,#7eh
+        movx   @r0,a
+
+
+; ------------------------------------------------------------
+; Runner 1 initialization
+; ------------------------------------------------------------
+
+        mov    r0,#runner1_x
+        mov    a,#RUNNER_START_X
+        mov    @r0,a
+
+        mov    r0,#runner1_last_direction
+        mov    a,#DIR_NONE
+        mov    @r0,a
+
+        mov    r0,#runner1_finished
+        mov    a,#00h
+        mov    @r0,a
+
+
+; ------------------------------------------------------------
+; Runner 2 initialization
+; ------------------------------------------------------------
+
+        mov    r0,#runner2_x
+        mov    a,#RUNNER_START_X
+        mov    @r0,a
+
+        mov    r0,#runner2_last_direction
+        mov    a,#DIR_NONE
+        mov    @r0,a
+
+        mov    r0,#runner2_finished
+        mov    a,#00h
+        mov    @r0,a
+
+
+; ------------------------------------------------------------
+; Race timer initialization
+; ------------------------------------------------------------
+
+        mov    r0,#timer_running
+        mov    a,#00h
+        mov    @r0,a
+
+        mov    r0,#timer_hundredths
+        mov    @r0,a
+
+        mov    r0,#timer_seconds
+        mov    @r0,a
+
+        ; Preserve code layout for 8048 page-relative branches
+        nop
+        nop
+        nop
+
+        mov    r0,#race_frames
+        mov    @r0,a
+
+
+; ------------------------------------------------------------
+; Display workspace
+; ------------------------------------------------------------
+
+        mov    r0,#seconds_tens
+        mov    @r0,a
+
+        mov    r0,#seconds_ones
+        mov    @r0,a
+
+        mov    r0,#display_digit0
+        mov    @r0,a
+
+        mov    r0,#display_digit1
+        mov    @r0,a
+
+        mov    r0,#display_digit2
+        mov    @r0,a
+
+        mov    r0,#display_digit3
+        mov    @r0,a
+
+
+; ------------------------------------------------------------
+; Saved finish times
+; ------------------------------------------------------------
+
+        mov    r0,#runner1_finish_seconds
+        mov    @r0,a
+
+        mov    r0,#runner1_finish_hundredths
+        mov    @r0,a
+
+        mov    r0,#runner2_finish_seconds
+        mov    @r0,a
+
+        mov    r0,#runner2_finish_hundredths
+        mov    @r0,a
+
+
+; Keep the runner 1 finish branch within one 8048 code page
+        nop
+        nop
+        nop
+        nop
+        nop
+
+
+; ------------------------------------------------------------
+; Draw runners
+; ------------------------------------------------------------
+
+        call   draw_runner1
+        call   draw_runner2
+
+        call   gfxon
+        call   race_countdown
+
+
+; ************************************************************
+; Main loop
+; ************************************************************
+
+main_loop:
+        call   waitvsync
+
+        call   update_race_clock
+        call   read_runner1_joystick
+        call   read_runner2_joystick
+        call   handle_finish_restart
+
+        jmp    main_loop
+
+
+; ************************************************************
+; Countdown
+; ************************************************************
+
+race_countdown:
+        mov    r0,#timer_running
+        mov    a,#00h
+        mov    @r0,a
+
+        mov    r5,#_3
+        call   draw_countdown_digit
+        call   wait_one_second
+
+        mov    r5,#_2
+        call   draw_countdown_digit
+        call   wait_one_second
+
+        mov    r5,#_1
+        call   draw_countdown_digit
+        call   wait_one_second
+
+        call   clear_countdown
+
+        ; Play the BIOS shooting tune when the countdown reaches zero
+        mov    a,#tune_shoot
+        call   playsound
+
+
+; ------------------------------------------------------------
+; Reset joystick directions
+; ------------------------------------------------------------
+
+        mov    r0,#runner1_last_direction
+        mov    a,#DIR_NONE
+        mov    @r0,a
+
+        mov    r0,#runner2_last_direction
+        mov    @r0,a
+
+
+; ------------------------------------------------------------
+; Reset timer
+; ------------------------------------------------------------
+
+        mov    r0,#timer_hundredths
+        mov    a,#00h
+        mov    @r0,a
+
+        mov    r0,#timer_seconds
+        mov    @r0,a
+
+        ; Preserve code layout for 8048 page-relative branches
+        nop
+        nop
+        nop
+
+        mov    r0,#race_frames
+        mov    @r0,a
+
+        call   draw_seconds
+
+
+; ------------------------------------------------------------
+; Start timer
+; ------------------------------------------------------------
+
+        mov    r0,#timer_running
+        mov    a,#01h
+        mov    @r0,a
+
+        ret
+
+
+; ************************************************************
+; Countdown display
+; ************************************************************
+
+draw_countdown_digit:
+        mov    a,#tune_keyclick
+        call   playsound
+
+        mov    a,r5
+        mov    r2,a
+
+        mov    r0,#vdc_char2
+        mov    r3,#50h       ; x-position
+        mov    r4,#66h       ; y-position + 2 pixels down
+
+        mov    a,r2
+        mov    r5,a
+
+        mov    r6,#col_chr_yellow
+        call   printchar
+
+        mov    r0,#vdc_char3
+        mov    r3,#00h
+        mov    r4,#00h
+        mov    r5,#_0
+        mov    r6,#col_chr_black
+        call   printchar
+
+        ret
+
+
+clear_countdown:
+        ; Hide the final countdown digit before starting the race
+        mov    r0,#vdc_char2
+        mov    r3,#00h
+        mov    r4,#00h
+        mov    r5,#_0
+        mov    r6,#col_chr_black
+        call   printchar
+        
+        ret
+
+
+; ************************************************************
+; Wait one PAL second
+; ************************************************************
+
+wait_one_second:
+        mov    r0,#countdown_frames
+        mov    a,#PAL_FRAMES_PER_SECOND
+        mov    @r0,a
+
+
+wait_one_second_loop:
+        call   waitvsync
+
+        mov    r0,#countdown_frames
+        mov    a,@r0
+        dec    a
+        mov    @r0,a
+
+        jnz    wait_one_second_loop
+
+        ret
+
+
+; ************************************************************
+; Race clock
+; ************************************************************
+
+update_race_clock:
+        mov    r0,#timer_running
+        mov    a,@r0
+
+        jnz    update_clock_running
+        ret
+
+
+update_clock_running:
+        mov    r0,#race_frames
+        mov    a,@r0
+        inc    a
+        mov    @r0,a
+
+        mov    r2,a
+        add    a,r2
+
+        mov    r0,#timer_hundredths
+        mov    @r0,a
+
+        mov    r0,#race_frames
+        mov    a,@r0
+        xrl    a,#PAL_FRAMES_PER_SECOND
+
+        jz     update_clock_new_second
+        ret
+
+
+update_clock_new_second:
+        mov    r0,#race_frames
+        mov    a,#00h
+        mov    @r0,a
+
+        mov    r0,#timer_hundredths
+        mov    @r0,a
+
+        mov    r0,#timer_seconds
+        mov    a,@r0
+        inc    a
+        mov    @r0,a
+
+        xrl    a,#60
+
+        jz     update_clock_maximum
+
+        call   draw_seconds
+        ret
+
+
+update_clock_maximum:
+        mov    r0,#timer_seconds
+        mov    a,#59
+        mov    @r0,a
+
+        mov    r0,#timer_hundredths
+        mov    a,#99
+        mov    @r0,a
+
+        mov    r0,#timer_running
+        mov    a,#00h
+        mov    @r0,a
+
+        call   draw_seconds
+        ret
+
+
+; ************************************************************
+; Runner 1 input
+; ************************************************************
+
+read_runner1_joystick:
+        mov    r0,#runner1_finished
+        mov    a,@r0
+
+        jz     runner1_read_input
+        ret
+
+
+runner1_read_input:
+        mov    r1,#00h
+        call   getjoystick
+
+        mov    a,r2
+
+        jnz    runner1_not_center
+        ret
+
+
+runner1_not_center:
+        mov    a,r2
+        inc    a
+
+        jnz    runner1_not_left
+        jmp    runner1_left
+
+
+runner1_not_left:
+        mov    a,r2
+        dec    a
+
+        jnz    runner1_input_done
+        jmp    runner1_right
+
+
+runner1_input_done:
+        ret
+
+
+runner1_left:
+        mov    r0,#runner1_last_direction
+        mov    a,@r0
+        xrl    a,#DIR_LEFT
+
+        jnz    runner1_left_changed
+        ret
+
+
+runner1_left_changed:
+        mov    a,@r0
+        xrl    a,#DIR_RIGHT
+
+        jnz    runner1_first_left
+        jmp    runner1_right_to_left
+
+
+runner1_first_left:
+        mov    a,#DIR_LEFT
+        mov    @r0,a
+        call   draw_runner1
+        ret
+
+
+runner1_right_to_left:
+        mov    a,#DIR_LEFT
+        mov    @r0,a
+
+        call   move_runner1_right
+        ret
+
+
+runner1_right:
+        mov    r0,#runner1_last_direction
+        mov    a,@r0
+        xrl    a,#DIR_RIGHT
+
+        jnz    runner1_right_changed
+        ret
+
+
+runner1_right_changed:
+        mov    a,@r0
+        xrl    a,#DIR_LEFT
+
+        jnz    runner1_first_right
+        jmp    runner1_left_to_right
+
+
+runner1_first_right:
+        mov    a,#DIR_RIGHT
+        mov    @r0,a
+        call   draw_runner1
+        ret
+
+
+runner1_left_to_right:
+        mov    a,#DIR_RIGHT
+        mov    @r0,a
+
+        call   move_runner1_right
+        ret
+
+
+; ************************************************************
+; Runner 2 input
+; ************************************************************
+
+read_runner2_joystick:
+        mov    r0,#runner2_finished
+        mov    a,@r0
+
+        jz     runner2_read_input
+        ret
+
+
+runner2_read_input:
+        mov    r1,#01h
+        call   getjoystick
+
+        mov    a,r2
+
+        jnz    runner2_not_center
+        ret
+
+
+runner2_not_center:
+        mov    a,r2
+        inc    a
+
+        jnz    runner2_not_left
+        jmp    runner2_left
+
+
+runner2_not_left:
+        mov    a,r2
+        dec    a
+
+        jnz    runner2_input_done
+        jmp    runner2_right
+
+
+runner2_input_done:
+        ret
+
+
+runner2_left:
+        mov    r0,#runner2_last_direction
+        mov    a,@r0
+        xrl    a,#DIR_LEFT
+
+        jnz    runner2_left_changed
+        ret
+
+
+runner2_left_changed:
+        mov    a,@r0
+        xrl    a,#DIR_RIGHT
+
+        jnz    runner2_first_left
+        jmp    runner2_right_to_left
+
+
+runner2_first_left:
+        mov    a,#DIR_LEFT
+        mov    @r0,a
+        call   draw_runner2
+        ret
+
+
+runner2_right_to_left:
+        mov    a,#DIR_LEFT
+        mov    @r0,a
+
+        call   move_runner2_right
+        ret
+
+
+runner2_right:
+        mov    r0,#runner2_last_direction
+        mov    a,@r0
+        xrl    a,#DIR_RIGHT
+
+        jnz    runner2_right_changed
+        ret
+
+
+runner2_right_changed:
+        mov    a,@r0
+        xrl    a,#DIR_LEFT
+
+        jnz    runner2_first_right
+        jmp    runner2_left_to_right
+
+
+runner2_first_right:
+        mov    a,#DIR_RIGHT
+        mov    @r0,a
+        call   draw_runner2
+        ret
+
+
+runner2_left_to_right:
+        mov    a,#DIR_RIGHT
+        mov    @r0,a
+
+        call   move_runner2_right
+        ret
+
+
+; ************************************************************
+; Move runner 1
+; ************************************************************
+
+move_runner1_right:
+        mov    r0,#runner1_finished
+        mov    a,@r0
+
+        jz     runner1_move_active
+        ret
+
+
+runner1_move_active:
+        mov    r0,#runner1_x
+        mov    a,@r0
+        add    a,#RUNNER_STEP
+        mov    @r0,a
+
+        xrl    a,#FINISH_X
+
+        ; Nearby conditional destination
+        jz     runner1_finish_jump
+
+        call   draw_runner1
+        ret
+
+
+runner1_finish_jump:
+        ; Full jump to finish handler
+        jmp    runner1_reached_finish
+
+
+runner1_reached_finish:
+        mov    a,#FINISH_X
+        mov    @r0,a
+
+        mov    r0,#runner1_finished
+        mov    a,#01h
+        mov    @r0,a
+
+        call   draw_runner1
+
+        mov    a,#tune_buzz
+        call   playsound
+
+
+; Save seconds
+        mov    r0,#timer_seconds
+        mov    a,@r0
+
+        mov    r0,#runner1_finish_seconds
+        mov    @r0,a
+
+
+; Save hundredths
+        mov    r0,#timer_hundredths
+        mov    a,@r0
+
+        mov    r0,#runner1_finish_hundredths
+        mov    @r0,a
+
+        call   draw_runner1_finish
+        jmp    draw_seconds
+
+
+; ************************************************************
+; Move runner 2
+; ************************************************************
+
+move_runner2_right:
+        mov    r0,#runner2_finished
+        mov    a,@r0
+
+        jz     runner2_move_active
+        ret
+
+
+runner2_move_active:
+        mov    r0,#runner2_x
+        mov    a,@r0
+        add    a,#RUNNER_STEP
+        mov    @r0,a
+
+        xrl    a,#FINISH_X
+
+        ; Nearby conditional destination
+        jz     runner2_finish_jump
+
+        call   draw_runner2
+        ret
+
+
+runner2_finish_jump:
+        ; Full jump to finish handler
+        jmp    runner2_reached_finish
+
+
+runner2_reached_finish:
+        mov    a,#FINISH_X
+        mov    @r0,a
+
+        mov    r0,#runner2_finished
+        mov    a,#01h
+        mov    @r0,a
+
+        call   draw_runner2
+
+        mov    a,#tune_buzz
+        call   playsound
+
+
+; Save seconds
+        mov    r0,#timer_seconds
+        mov    a,@r0
+
+        mov    r0,#runner2_finish_seconds
+        mov    @r0,a
+
+
+; Save hundredths
+        mov    r0,#timer_hundredths
+        mov    a,@r0
+
+        mov    r0,#runner2_finish_hundredths
+        mov    @r0,a
+
+        call   draw_runner2_finish
+        ret
+
+
+; ************************************************************
+; Stop timer after both finish
+; ************************************************************
+
+stop_clock_if_both_finished:
+        mov    r0,#runner1_finished
+        mov    a,@r0
+
+        jnz    check_runner2_finished
+        ret
+
+
+check_runner2_finished:
+        mov    r0,#runner2_finished
+        mov    a,@r0
+
+        jnz    stop_race_clock
+        ret
+
+
+stop_race_clock:
+        mov    r0,#timer_running
+        mov    a,#00h
+        mov    @r0,a
+
+        ret
+
+
+; ************************************************************
+; Draw runners
+; ************************************************************
+
+draw_runner1:
+        mov    r0,#runner1_x
+        mov    a,@r0
+        mov    r3,a
+
+        mov    r0,#runner1_last_direction
+        mov    a,@r0
+        mov    r2,a
+
+        mov    r0,#runner1_finished
+        mov    a,@r0
+        call   select_runner_frame
+
+        mov    r0,#vdc_char0
+        mov    r4,#68h
+        mov    r6,#col_chr_red
+        call   printchar
+
+        ret
+
+
+draw_runner2:
+        mov    r0,#runner2_x
+        mov    a,@r0
+        mov    r3,a
+
+        mov    r0,#runner2_last_direction
+        mov    a,@r0
+        mov    r2,a
+
+        mov    r0,#runner2_finished
+        mov    a,@r0
+        call   select_runner_frame
+
+        mov    r0,#vdc_char1
+        mov    r4,#80h
+        mov    r6,#col_chr_green
+        call   printchar
+
+        ret
+
+
+; ************************************************************
+; Live seconds
+; ************************************************************
+
+draw_seconds:
+        mov    r0,#runner1_finished
+        mov    a,@r0
+
+        jz     draw_seconds_continue
+        mov    r0,#runner2_finished
+        mov    a,@r0
+        jz     draw_seconds_continue
+        ret
+
+
+draw_seconds_continue:
+        mov    r0,#timer_seconds
+        mov    a,@r0
+
+        mov    r2,#00h
+
+
+draw_seconds_divide:
+        add    a,#0f6h
+
+        jc     draw_seconds_subtracted
+
+        add    a,#0ah
+        jmp    draw_seconds_store
+
+
+draw_seconds_subtracted:
+        inc    r2
+        jmp    draw_seconds_divide
+
+
+draw_seconds_store:
+        mov    r0,#seconds_ones
+        mov    @r0,a
+
+        mov    a,r2
+        mov    r0,#seconds_tens
+        mov    @r0,a
+
+
+; Tens
+        mov    r0,#seconds_tens
+        mov    a,@r0
+        mov    r5,a
+
+        call   select_timer_tens_slot
+        mov    r3,#78h
+        mov    r4,#1eh
+        mov    r6,#col_chr_yellow
+        call   printchar
+
+
+; Ones
+        mov    r0,#seconds_ones
+        mov    a,@r0
+        mov    r5,a
+
+        call   select_timer_tens_slot
+        inc    r0
+        inc    r0
+        inc    r0
+        inc    r0
+        mov    r3,#80h
+        mov    r4,#1eh
+        mov    r6,#col_chr_yellow
+        call   printchar
+
+        ret
+
+
+; ************************************************************
+; Decimal conversion
+; ************************************************************
+
+split_decimal:
+        mov    r2,#00h
+
+
+split_decimal_loop:
+        add    a,#0f6h
+
+        jc     split_decimal_subtracted
+
+        add    a,#0ah
+        ret
+
+
+split_decimal_subtracted:
+        inc    r2
+        jmp    split_decimal_loop
+
+
+prepare_finish_digits:
+        mov    a,r3
+        call   split_decimal
+
+        mov    r0,#display_digit1
+        mov    @r0,a
+
+        mov    a,r2
+        mov    r0,#display_digit0
+        mov    @r0,a
+
+        mov    a,r4
+        call   split_decimal
+
+        mov    r0,#display_digit3
+        mov    @r0,a
+
+        mov    a,r2
+        mov    r0,#display_digit2
+        mov    @r0,a
+
+        ret
+
+
+; ************************************************************
+; Runner 1 finish result: SS.hh
+; ************************************************************
+
+draw_runner1_finish:
+        mov    r0,#runner1_finish_seconds
+        mov    a,@r0
+        mov    r3,a
+
+        mov    r0,#runner1_finish_hundredths
+        mov    a,@r0
+        mov    r4,a
+
+        call   prepare_finish_digits
+
+
+; Seconds tens
+        mov    r0,#display_digit0
+        mov    a,@r0
+        mov    r5,a
+
+        mov    r0,#vdc_char2
+        mov    r3,#18h
+        mov    r4,#68h
+        mov    r6,#col_chr_red
+        call   printchar
+
+
+; Seconds ones
+        mov    r0,#display_digit1
+        mov    a,@r0
+        mov    r5,a
+
+        mov    r0,#vdc_char3
+        mov    r3,#20h
+        mov    r4,#68h
+        mov    r6,#col_chr_red
+        call   printchar
+
+
+; Decimal point
+        mov    r0,#vdc_chara
+        mov    r3,#28h
+        mov    r4,#68h
+        mov    r5,#_DOT
+        mov    r6,#col_chr_red
+        call   printchar
+
+
+; Hundredths tens
+        mov    r0,#display_digit2
+        mov    a,@r0
+        mov    r5,a
+
+        mov    r0,#vdc_char4
+        mov    r3,#30h
+        mov    r4,#68h
+        mov    r6,#col_chr_red
+        call   printchar
+
+
+; Hundredths ones
+        mov    r0,#display_digit3
+        mov    a,@r0
+        mov    r5,a
+
+        mov    r0,#vdc_char5
+        mov    r3,#38h
+        mov    r4,#68h
+        mov    r6,#col_chr_red
+        call   printchar
+
+        ret
+
+
+; ************************************************************
+; Runner 2 finish result: SS.hh
+; ************************************************************
+
+draw_runner2_finish:
+        mov    r0,#runner2_finish_seconds
+        mov    a,@r0
+        mov    r3,a
+
+        mov    r0,#runner2_finish_hundredths
+        mov    a,@r0
+        mov    r4,a
+
+        call   prepare_finish_digits
+
+
+; Seconds tens
+        mov    r0,#display_digit0
+        mov    a,@r0
+        mov    r5,a
+
+        mov    r0,#vdc_char6
+        mov    r3,#18h
+        mov    r4,#80h
+        mov    r6,#col_chr_green
+        call   printchar
+
+
+; Seconds ones
+        mov    r0,#display_digit1
+        mov    a,@r0
+        mov    r5,a
+
+        mov    r0,#vdc_char7
+        mov    r3,#20h
+        mov    r4,#80h
+        mov    r6,#col_chr_green
+        call   printchar
+
+
+; Decimal point
+        mov    r0,#vdc_charb
+        mov    r3,#28h
+        mov    r4,#80h
+        mov    r5,#_DOT
+        mov    r6,#col_chr_green
+        call   printchar
+
+
+; Hundredths tens
+        mov    r0,#display_digit2
+        mov    a,@r0
+        mov    r5,a
+
+        mov    r0,#vdc_char8
+        mov    r3,#30h
+        mov    r4,#80h
+        mov    r6,#col_chr_green
+        call   printchar
+
+
+; Hundredths ones
+        mov    r0,#display_digit3
+        mov    a,@r0
+        mov    r5,a
+
+        mov    r0,#vdc_char9
+        mov    r3,#38h
+        mov    r4,#80h
+        mov    r6,#col_chr_green
+        call   printchar
+
+        ret
+
+; ************************************************************
+; Restart after both players have pressed fire
+;
+; countdown_frames is reused after the countdown:
+;   bit 0 = player 1 has pressed fire
+;   bit 1 = player 2 has pressed fire
+;
+; R1 selects the controller. The selected controller's fire
+; state is returned in F0. Presses are latched, so they do not
+; need to be simultaneous.
+; ************************************************************
+
+handle_finish_restart:
+        call   stop_clock_if_both_finished
+
+        mov    r0,#runner1_finished
+        mov    a,@r0
+        jz     finish_restart_return
+
+        mov    r0,#runner2_finished
+        mov    a,@r0
+        jz     finish_restart_return
+
+        jmp    check_restart_buttons
+
+
+finish_restart_return:
+        ret
+
+
+check_restart_buttons:
+        ; Player 1 fire
+        mov    r1,#00h
+        call   getjoystick
+        jf0    restart_player1_pressed
+
+restart_check_player2:
+        ; Player 2 fire
+        mov    r1,#01h
+        call   getjoystick
+        jf0    restart_player2_pressed
+
+restart_check_ready:
+        mov    r0,#countdown_frames
+        mov    a,@r0
+        xrl    a,#03h
+        jz     restart_game
+        ret
+
+
+restart_player1_pressed:
+        mov    r0,#countdown_frames
+        mov    a,@r0
+        orl    a,#01h
+        mov    @r0,a
+        jmp    restart_check_player2
+
+
+restart_player2_pressed:
+        mov    r0,#countdown_frames
+        mov    a,@r0
+        orl    a,#02h
+        mov    @r0,a
+        jmp    restart_check_ready
+
+
+restart_game:
+        ; Clear all 12 character objects (48 bytes)
+        call   gfxoff
+        mov    r0,#vdc_char0
+        mov    r2,#48
+        mov    a,#00h
+
+restart_clear_loop:
+        movx   @r0,a
+        inc    r0
+        djnz   r2,restart_clear_loop
+
+        jmp    start
+
+
+select_runner_frame:
+        jnz    select_runner_finished_frame
+
+        mov    a,r2
+        xrl    a,#DIR_RIGHT
+        jz     select_runner_right_frame
+
+        mov    r5,#32h
+        ret
+
+
+select_runner_right_frame:
+        mov    r5,#33h
+        ret
+
+
+select_runner_finished_frame:
+        mov    r5,#3ah
+        ret
+
+
+; runner1's result uses char4/5. While runner2 is still racing, its
+; unused result slots char8/9 keep the live timer visible.
+; Both finish results need all 12 characters, so draw_seconds
+; returns without drawing once both runners have finished.
+select_timer_tens_slot:
+        mov    r0,#runner1_finished
+        mov    a,@r0
+        mov    r0,#vdc_char4
+        jz     timer_slot_ready
+        mov    r0,#vdc_char8
+timer_slot_ready:
+        ret
+
+program_end:
+
