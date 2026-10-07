@@ -263,10 +263,17 @@ start:
 main_loop:
         call   waitvsync
 
+        ; The VDC ignores writes to its object registers while the
+        ; display is enabled, so all drawing happens with graphics off,
+        ; inside vertical blank. (Fix for real hardware.)
+        call   gfxoff
+
         call   update_race_clock
         call   read_runner1_joystick
         call   read_runner2_joystick
         call   handle_finish_restart
+
+        call   gfxon
 
         jmp    main_loop
 
@@ -330,7 +337,10 @@ race_countdown:
         mov    r0,#race_frames
         mov    @r0,a
 
+        call   waitvsync
+        call   gfxoff
         call   draw_seconds
+        call   gfxon
 
 
 ; ------------------------------------------------------------
@@ -349,6 +359,9 @@ race_countdown:
 ; ************************************************************
 
 draw_countdown_digit:
+        call   waitvsync
+        call   gfxoff
+
         mov    a,#tune_keyclick
         call   playsound
 
@@ -366,25 +379,24 @@ draw_countdown_digit:
         call   printchar
 
         mov    r0,#vdc_char3
+countdown_clear_tail:
         mov    r3,#00h
         mov    r4,#00h
         mov    r5,#_0
         mov    r6,#col_chr_black
         call   printchar
 
-        ret
+        jmp    gfxon
 
 
 clear_countdown:
         ; Hide the final countdown digit before starting the race
+        ; (shares the tail of draw_countdown_digit to keep the code
+        ; inside the first 2K bank - see below)
+        call   waitvsync
+        call   gfxoff
         mov    r0,#vdc_char2
-        mov    r3,#00h
-        mov    r4,#00h
-        mov    r5,#_0
-        mov    r6,#col_chr_black
-        call   printchar
-        
-        ret
+        jmp    countdown_clear_tail
 
 
 ; ************************************************************
