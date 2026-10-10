@@ -252,8 +252,8 @@ start:
         call   draw_runner1
         call   draw_runner2
 
-        call   gfxon
-        call   race_countdown
+        call   stadium_setup            ; + SEL MB1 = 3 bytes
+        nop                              ; (stadium_setup ends in race_countdown)
 
 
 ; ************************************************************
@@ -273,9 +273,9 @@ main_loop:
         call   read_runner2_joystick
         call   handle_finish_restart
 
-        call   gfxon
+        jmp    frame_hook               ; + SEL MB1 = 3 bytes
 
-        jmp    main_loop
+        nop                              ; (frame_hook ends in jmp main_loop)
 
 
 ; ************************************************************
@@ -302,8 +302,8 @@ race_countdown:
         call   clear_countdown
 
         ; Play the BIOS shooting tune when the countdown reaches zero
-        mov    a,#tune_shoot
-        call   playsound
+        call   bang                     ; + SEL MB1 = 3 bytes
+        nop                              ; (bang plays tune_shoot)
 
 
 ; ------------------------------------------------------------
@@ -380,8 +380,10 @@ draw_countdown_digit:
 
         mov    r0,#vdc_char3
 countdown_clear_tail:
+        ; park the hidden character below the screen (y = F8h, as the
+        ; BIOS does for unused characters); at 0,0 it showed as an "A"
         mov    r3,#00h
-        mov    r4,#00h
+        mov    r4,#0F8h
         mov    r5,#_0
         mov    r6,#col_chr_black
         call   printchar
@@ -1294,4 +1296,672 @@ timer_slot_ready:
         ret
 
 program_end:
+
+; ************************************************************
+; Stadium and starter (added 2026)
+;  - G7400 only: an EF9340/41 "Plus" stadium behind the race -
+;    crowd in the stands, advertising boards, a blue track with
+;    white lane lines, green infield with flowers and a banner.
+;  - Every console: a race official on the infield who holds the
+;    starting pistol up during 3-2-1, fires it on GO (muzzle flash
+;    plus a puff of smoke that drifts away) and lowers his arm.
+;    Uses three of the VDC's sprites, which the game left unused.
+; ************************************************************
+
+plus_active                 equ    36h   ; 1 = Plus stadium drawn
+starter_t                   equ    37h   ; frames since the shot, 0 = not fired
+crowd_seed                  equ    38h
+cur_row                     equ    39h
+rep_cnt                     equ    3ah
+item_start                  equ    3bh
+
+        org    0900h
+
+; Code from here on lives in the cartridge's upper 2K bank (MB1).
+; The three hooks in the original code enter it with SEL MB1 (inserted
+; by AS), each in exactly the bytes of the instructions it replaces,
+; so nothing in the original code moves. BIOS calls from up here go
+; through bcall, which reselects MB1 when the BIOS routine returns.
+
+bcall   macro  target
+        call   target
+        sel    mb1
+        endm
+
+; Called from start in place of "call gfxon / call race_countdown"
+; (graphics are off).
+stadium_setup:
+        mov    r0,#plus_active
+        mov    @r0,#0
+        inc    r0                       ; starter_t
+        mov    @r0,#0
+
+        ; Known G7400 BIOS opcode signatures (same test as Bird Hunt);
+        ; anything else is treated as a plain G7000.
+        mov    a,#07eh
+        movp3  a,@a
+        xrl    a,#039h
+        jnz    setup_sprites
+        mov    a,#094h
+        movp3  a,@a
+        xrl    a,#0bbh
+        jnz    setup_sprites
+
+        mov    r0,#plus_active
+        mov    @r0,#1
+        call   draw_stadium
+
+        ; white lane lines on the blue track
+        mov    r0,#vdc_color
+        mov    a,#col_grd_white | col_grd_lum
+        movx   @r0,a
+
+setup_sprites:
+        call   record_setup
+        call   starter_sprites
+        call   gfxon                    ; AS selects MB0 for the BIOS call...
+        jmp    race_countdown           ; ...and race_countdown returns to start
+
+
+; Jumped to from the main loop in place of "call gfxon / jmp main_loop"
+; (graphics are off, inside vertical blank): advance the starter
+; animation, draw it, then carry on with the loop.
+frame_hook:
+        mov    r0,#starter_t
+        mov    a,@r0
+        jz     frame_hook_draw
+        inc    a
+        jz     frame_hook_draw          ; hold at 255
+        mov    @r0,a
+frame_hook_draw:
+        call   record_frame
+        call   starter_sprites
+        call   gfxon
+        jmp    main_loop                ; MB0 again (AS inserts SEL MB0)
+
+
+; Called from race_countdown in place of "mov a,#tune_shoot / call
+; playsound": mark the shot, then play it.
+bang:
+        mov    r0,#starter_t
+        mov    @r0,#1
+        mov    a,#tune_shoot
+        jmp    playsound                ; returns to race_countdown, MB0
+
+
+; ------------------------------------------------------------
+; Starter sprites: 0 = official, 1 = muzzle flash, 2 = smoke
+; ------------------------------------------------------------
+
+starter_sprites:
+        mov    r0,#starter_t
+        mov    a,@r0
+        mov    r2,a                     ; r2 = t
+        add    a,#256-100               ; settled after frame 100: skip
+        jc     starter_done
+        mov    a,r2
+
+        ; official: pistol up until shortly after the shot
+        mov    r1,#spr_starter_up & 0ffh
+        jz     official_shape
+        add    a,#256-12
+        jnc    official_shape
+        mov    r1,#spr_starter_dn & 0ffh
+official_shape:
+        mov    r0,#vdc_spr0_shape
+        call   copy_shape
+        mov    r0,#vdc_spr0_ctrl
+        mov    a,#206
+        movx   @r0,a
+        inc    r0
+        mov    a,#3
+        movx   @r0,a
+        inc    r0
+        mov    a,#col_spr_white | spr_double
+        movx   @r0,a
+
+        ; muzzle flash: frames 1..7 after the shot
+        mov    r1,#spr_flash & 0ffh
+        mov    r0,#vdc_spr1_shape
+        call   copy_shape
+        mov    r0,#vdc_spr1_ctrl
+        mov    a,r2
+        jz     flash_hide
+        add    a,#256-8
+        jc     flash_hide
+        mov    a,#200
+        movx   @r0,a
+        inc    r0
+        mov    a,#11
+        jmp    flash_pos
+flash_hide:
+        mov    a,#0f8h
+        movx   @r0,a
+        inc    r0
+flash_pos:
+        movx   @r0,a
+        inc    r0
+        mov    a,#col_spr_yellow
+        movx   @r0,a
+
+        ; smoke: frames 1..95, first a puff, then breaking up and drifting
+        mov    r1,#spr_smoke1 & 0ffh
+        mov    a,r2
+        add    a,#256-24
+        jnc    smoke_shape
+        mov    r1,#spr_smoke2 & 0ffh
+smoke_shape:
+        mov    r0,#vdc_spr2_shape
+        call   copy_shape
+        mov    r0,#vdc_spr2_ctrl
+        mov    a,r2
+        jz     smoke_hide
+        add    a,#256-96
+        jc     smoke_hide
+        mov    a,r2                     ; y = 198 - t/8
+        rr     a
+        rr     a
+        rr     a
+        anl    a,#1fh
+        cpl    a
+        add    a,#198+1
+        movx   @r0,a
+        inc    r0
+        mov    a,r2                     ; x = 20 + t/4
+        rr     a
+        rr     a
+        anl    a,#3fh
+        add    a,#20
+        jmp    smoke_pos
+smoke_hide:
+        mov    a,#0f8h
+        movx   @r0,a
+        inc    r0
+smoke_pos:
+        movx   @r0,a
+        inc    r0
+        mov    a,#col_spr_white
+        movx   @r0,a
+starter_done:
+        ret
+
+
+; copy 8 shape bytes from this page (offset r1) to VDC @r0
+copy_shape:
+        mov    r3,#8
+copy_shape_loop:
+        mov    a,r1
+        movp   a,@a
+        movx   @r0,a
+        inc    r0
+        inc    r1
+        djnz   r3,copy_shape_loop
+        ret
+
+spr_starter_up:
+        db     002h,032h,036h,07ch,038h,038h,028h,06ch
+spr_starter_dn:
+        db     000h,030h,030h,078h,078h,038h,028h,06ch
+spr_flash:
+        db     010h,054h,038h,0feh,038h,054h,010h,000h
+spr_smoke1:
+        db     038h,07ch,0eeh,07ch,030h,000h,000h,000h
+spr_smoke2:
+        db     01ah,06eh,098h,066h,010h,040h,000h,000h
+
+; record cells (see "Record" below): a quad's cells 0 and 2 from
+; rec_buf at r1 and r1+2, then two blanks
+dl_quad:
+        mov    a,@r1
+        call   dl_put
+        inc    r1
+        inc    r1
+        mov    a,@r1
+        call   dl_put
+        dec    r1
+        dec    r1
+        jf1    dl_blanks_far            ; blanks only at setup (F1)
+        ret
+dl_blanks_far:
+        jmp    dl_blanks
+
+        if     $ > 0a00h
+        fatal  "starter page overflow"
+        endif
+
+
+; ------------------------------------------------------------
+; Plus stadium (G7400 only). Graphics are off; interrupts are
+; disabled while the EF9340/41 is being written.
+; ------------------------------------------------------------
+
+        org    0a00h
+draw_stadium:
+        bcall  plusenable
+        clr    a
+        bcall  plusloadr                ; Plus display off while drawing
+        dis    i
+
+        ; define the custom glyphs (ext set, codes 0A0h...)
+        mov    r7,#plus_cmd_brow
+        mov    r6,#0
+        bcall  pluscmd
+        mov    r2,#0                    ; offset in glyph_data
+        mov    r3,#0a0h                 ; glyph code
+glyph_loop:
+        mov    r7,#plus_cmd_loadm
+        mov    r6,#plus_loadm_wrni
+        bcall  pluscmd
+        mov    r6,#088h
+        mov    a,r3
+        mov    r7,a
+        bcall  plusdata
+        mov    r7,#plus_cmd_loadm
+        mov    r6,#plus_loadm_wrsl
+        bcall  pluscmd
+        mov    r4,#10
+glyph_slice:
+        mov    a,r2
+        call   read_glyph
+        mov    r6,a
+        mov    r7,a
+        bcall  plusdata
+        inc    r2
+        djnz   r4,glyph_slice
+        inc    r3
+        mov    a,r3
+        xrl    a,#0a0h+6
+        jnz    glyph_loop
+
+        ; draw the screen from row_table
+        mov    r0,#crowd_seed
+        mov    @r0,#5ah
+        mov    r2,#0                    ; offset in row_table (page 08h)
+row_next:
+        call   read_row
+        mov    r5,a
+        xrl    a,#0ffh
+        jz     rows_done
+        mov    r0,#cur_row
+        mov    a,r5
+        mov    @r0,a
+        call   read_row                 ; how many rows look like this one
+        mov    r0,#rep_cnt
+        mov    @r0,a
+        mov    r0,#item_start
+        mov    a,r2
+        mov    @r0,a
+row_draw:
+        mov    r7,#plus_cmd_brow
+        mov    r0,#cur_row
+        mov    a,@r0
+        mov    r6,a
+        bcall  pluscmd
+        mov    r7,#plus_cmd_loadx
+        mov    r6,#0
+        bcall  pluscmd
+        mov    r7,#plus_cmd_loadm
+        mov    r6,#plus_loadm_wr
+        bcall  pluscmd
+item_next:
+        call   read_row
+        jnz    item_have
+        mov    r0,#rep_cnt              ; 0 = end of row: repeat it?
+        mov    a,@r0
+        dec    a
+        mov    @r0,a
+        jz     row_next
+        mov    r0,#cur_row
+        inc    @r0
+        mov    r0,#item_start
+        mov    a,@r0
+        mov    r2,a
+        jmp    row_draw
+item_have:
+        mov    r3,a
+        xrl    a,#0feh
+        jz     item_crowd
+        mov    a,r3
+        jb6    item_text
+        call   read_row                 ; run: n, attr, char
+        mov    r4,a
+        call   read_row
+        mov    r5,a
+run_cell:
+        mov    a,r4
+        mov    r6,a
+        mov    a,r5
+        mov    r7,a
+        bcall  plusdata
+        djnz   r3,run_cell
+        jmp    item_next
+item_text:
+        mov    a,r3
+        anl    a,#3fh
+        mov    r3,a
+        call   read_row                 ; attr, then n characters
+        mov    r4,a
+text_cell:
+        call   read_row
+        mov    r7,a
+        mov    a,r4
+        mov    r6,a
+        bcall  plusdata
+        djnz   r3,text_cell
+        jmp    item_next
+item_crowd:
+        mov    r3,#40
+crowd_cell:
+        mov    r0,#crowd_seed           ; s = s*5 + 3Bh
+        mov    a,@r0
+        mov    r4,a
+        rl     a
+        rl     a
+        anl    a,#0fch
+        add    a,r4
+        add    a,#03bh
+        mov    @r0,a
+        mov    r4,a
+        swap   a                        ; shirt colour from the high bits
+        anl    a,#07h
+        jnz    crowd_colour
+        mov    a,#07h                   ; no black shirts
+crowd_colour:
+        orl    a,#088h                  ; ext, black seats, no blink
+        mov    r6,a
+        mov    a,r4                     ; spectator glyph from bits 6-7
+        rl     a
+        rl     a
+        anl    a,#03h
+        add    a,#161
+        mov    r7,a
+        mov    a,r3                     ; cols 29-33 (r3 = 11..7) stay black
+        add    a,#256-7
+        jnc    crowd_cell_write
+        mov    a,r3
+        add    a,#256-12
+        jc     crowd_cell_write
+        mov    r6,#088h
+        mov    r7,#160
+crowd_cell_write:
+        bcall  plusdata
+        djnz   r3,crowd_cell
+        jmp    item_next
+
+rows_done:
+        mov    r7,#plus_cmd_loady0
+        mov    r6,#0
+        bcall  pluscmd
+        en     i
+        bcall  waitvsync
+        bcall  plusenable
+        mov    a,#plus_loadr_dspl+plus_loadr_srow
+        bcall  plusloadr
+        mov    r7,#0feh                 ; every VDC colour opaque except black
+        mov    a,#0ffh
+        bcall  plusmode
+        bcall  vdcenable
+        ret
+
+
+; ------------------------------------------------------------
+; Record (added 2026): the best time stays in the lower right
+; corner, BEST 6.28 at power-on (the Skrolli Party 2026 record).
+; Beat it and the winner jumps for joy at the finish line while
+; NEW/BEST flashes; the new record then stands until the console
+; is switched off or reset. Drawn with the VDC's four quad
+; objects, which the game left unused: a quad shows its four
+; characters 16 px apart, so two quads 8 px apart make one row.
+; ------------------------------------------------------------
+
+rec_sec                     equ    27h   ; record seconds | colour << 4
+rec_hun                     equ    3ch   ; record hundredths
+cel_t                       equ    3bh   ; party frame, 0 = no party
+rec_buf                     equ    display_digit0   ; 4 cells to draw
+
+REC_X                       equ    7fh
+REC_Y1                      equ    0ceh
+REC_Y2                      equ    0e0h
+
+; at every start. The BIOS clears RAM at power-on and reset, so a
+; zero record means "not set yet".
+record_setup:
+        mov    r0,#rec_sec
+        mov    a,@r0
+        jnz    rs_known
+        mov    @r0,#(col_chr_white << 4) | 6
+        mov    r0,#rec_hun
+        mov    @r0,#28
+rs_known:
+        mov    r0,#cel_t
+        mov    @r0,#0
+        clr    f1
+        cpl    f1                       ; write the quads' blank cells too
+        call   draw_time
+        jmp    rf_best
+
+; label line: a = offset of four characters in the data page
+draw_label:
+        mov    r1,#rec_buf
+        mov    r2,#4
+dlab_copy:
+        mov    r3,a
+        call   read_glyph
+        mov    @r1,a
+        inc    r1
+        mov    a,r3
+        inc    a
+        djnz   r2,dlab_copy
+        mov    r0,#vdc_quad0
+        mov    r4,#REC_Y1
+        jmp    draw_line
+
+; time line: S.hh in the record holder's colour
+draw_time:
+        mov    r0,#rec_hun
+        mov    a,@r0
+        mov    r2,#0ffh
+dt_div:
+        inc    r2
+        add    a,#256-10
+        jc     dt_div
+        add    a,#10
+        mov    r1,#rec_buf+3
+        mov    @r1,a
+        dec    r1
+        mov    a,r2
+        mov    @r1,a
+        dec    r1
+        mov    @r1,#_DOT
+        dec    r1
+        call   rec_colour               ; r7 = colour, a = rec_sec
+        anl    a,#0fh
+        mov    @r1,a
+        mov    r0,#vdc_quad2
+        mov    r4,#REC_Y2
+
+; r0 = first of two quads, r4 = y, r7 = colour, rec_buf = cells
+draw_line:
+        mov    a,r0
+        add    a,#10h
+        mov    r2,a                     ; the second quad
+        mov    r1,#rec_buf
+        mov    r3,#REC_X
+        call   dl_quad                  ; cells 0 and 2
+        mov    a,r2
+        mov    r0,a
+        inc    r1
+        mov    r3,#REC_X+8              ; cells 1 and 3
+        jmp    dl_quad
+
+dl_blanks:
+        mov    a,#0ch
+        call   dl_put
+        mov    a,#0ch
+        jmp    dl_put
+
+; once per frame (graphics off): check new finishes, run the party
+record_frame:
+        clr    f1
+        mov    r1,#runner1_finished
+        mov    r6,#col_chr_red
+        call   rf_runner
+        mov    r1,#runner2_finished
+        mov    r6,#col_chr_green
+        call   rf_runner
+        mov    r0,#cel_t
+        mov    a,@r0
+        jz     rf_ret
+        inc    a
+        mov    @r0,a
+        jz     rf_ret                   ; 255 frames, then it's over
+        mov    r2,a
+        xrl    a,#6                     ; frame 6: the new time
+        jz     draw_time
+        mov    a,r2
+        add    a,#256-50                ; frames 3..49: six jumps
+        jc     rf_flash
+        mov    a,r2
+        anl    a,#07h
+        add    a,#jump_table - glyph_data
+        call   read_glyph
+        mov    r4,a                     ; -height
+        call   rec_colour               ; r6 = colour
+        mov    r3,#FINISH_X
+        mov    r5,#3ah                  ; arms-up finish glyph
+        mov    r0,#vdc_char0
+        mov    r1,#68h
+        jb5    rf_jump                  ; red holds the record
+        mov    r0,#vdc_char1
+        mov    r1,#80h
+rf_jump:
+        mov    a,r1
+        add    a,r4
+        mov    r4,a
+        bcall  printchar
+rf_flash:
+        mov    a,r2                     ; label every 8 frames
+        anl    a,#07h
+        jnz    rf_ret
+        mov    a,r2
+        jb3    rf_best
+        call   rec_colour
+        mov    a,#rec_new - glyph_data
+        jmp    draw_label
+rf_best:
+        mov    r7,#col_chr_yellow
+        mov    a,#rec_best - glyph_data
+        jmp    draw_label
+
+; r1 = runnerN_finished, r6 = its colour. A checked finish time is
+; marked by setting its seconds to 0FFh (the game has drawn it
+; already and does not read it again).
+rf_runner:
+        mov    a,@r1
+        jz     rf_ret
+        mov    a,r1                     ; seconds at 2*r1 - 2ah
+        add    a,r1
+        add    a,#256-2ah
+        mov    r0,a
+        mov    a,@r0
+        mov    r2,a                     ; s
+        inc    a
+        jz     rf_ret
+        mov    @r0,#0ffh
+        inc    r0
+        mov    a,@r0
+        mov    r3,a                     ; h
+        mov    r0,#rec_sec
+        mov    a,@r0
+        anl    a,#0fh
+        cpl    a
+        add    a,r2                     ; s - S - 1, carry if s > S
+        jc     rf_ret
+        inc    a
+        jnz    rc_new                   ; s < S
+        mov    r0,#rec_hun
+        mov    a,@r0
+        cpl    a
+        add    a,r3
+        jc     rf_ret                   ; h > H
+        inc    a
+        jz     rf_ret                   ; a tie is not a record
+rc_new:
+        mov    a,r6
+        swap   a
+        orl    a,r2
+        mov    r0,#rec_sec
+        mov    @r0,a
+        mov    r0,#rec_hun
+        mov    a,r3
+        mov    @r0,a
+        mov    r0,#cel_t
+        mov    @r0,#1
+rf_ret:
+        ret
+
+        if     $ > 0c00h
+        fatal  "upper bank overflow"
+        endif
+
+        org    0800h                    ; data page (upper bank)
+read_row:
+        mov    a,r2
+        inc    r2
+        add    a,#row_table & 0ffh
+        movp   a,@a
+        ret
+
+read_glyph:
+        add    a,#glyph_data & 0ffh
+        movp   a,@a
+        ret
+
+dl_put:                                 ; record cell: a = char, r7 = colour
+        mov    r5,a
+        mov    a,r7
+        mov    r6,a
+        bcall  printchar
+        ret
+
+rec_colour:                             ; r6 = r7 = holder colour, a = rec_sec
+        mov    r0,#rec_sec
+        mov    a,@r0
+        swap   a
+        anl    a,#0fh
+        mov    r7,a
+        mov    r6,a
+        mov    a,@r0
+        ret
+
+glyph_data:
+        db     000h,000h,000h,000h,000h,000h,000h,000h,000h,000h
+        db     000h,066h,066h,000h,077h,077h,077h,000h,000h,000h
+        db     010h,016h,0d6h,0d0h,077h,077h,077h,000h,000h,000h
+        db     001h,061h,06dh,00dh,077h,077h,077h,000h,000h,000h
+        db     000h,006h,006h,000h,007h,007h,007h,000h,000h,000h
+        db     000h,004h,00eh,004h,000h,000h,040h,0e0h,040h,000h
+jump_table:                             ; record party: -height per frame
+        db     0, 0fch, 0f8h, 0f6h, 0f6h, 0f8h, 0fch, 0
+rec_best:
+        db     25h, 12h, 19h, 14h       ; BEST
+rec_new:
+        db     2dh, 12h, 11h, 0ch       ; NEW
+
+row_table:
+        db     01fh,001h,0feh,000h,000h,001h,0feh,000h,001h,001h,0feh,000h,002h,001h,001h,044h
+        db     080h,05ah,00fh,020h,04ch,045h,020h,053h,050h,052h,049h,04eh,054h,020h,02ah,020h
+        db     031h,030h,030h,020h,04dh,020h,02ah,020h,047h,037h,034h,030h,030h,005h,088h,0a0h
+        db     008h,0cch,0a0h,000h,003h,00fh,001h,0aah,0a0h,025h,0cch,0a0h,002h,0aah,0a0h,000h
+        db     012h,001h,009h,0aah,0a0h,001h,0abh,0a5h,00dh,0aah,0a0h,001h,0afh,0a5h,010h,0aah
+        db     0a0h,000h,013h,001h,028h,0aah,0a0h,000h,014h,001h,00ah,0aah,0a0h,001h,055h,080h
+        db     054h,00fh,020h,053h,04bh,052h,04fh,04ch,04ch,049h,020h,050h,041h,052h,054h,059h
+        db     020h,032h,030h,032h,036h,020h,009h,0aah,0a0h,000h,015h,001h,006h,0aah,0a0h,001h
+        db     0afh,0a5h,00dh,0aah,0a0h,001h,0abh,0a5h,013h,0aah,0a0h,000h,016h,002h,028h,0aah
+        db     0a0h,000h,0ffh
+
+        if     $ > 0900h
+        fatal  "data page overflow"
+        endif
+
 
